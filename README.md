@@ -8,7 +8,7 @@ Production-ready Next.js app for a vegetable and fruit store.
 - Environment variable support via `NEXT_PUBLIC_STORE_NAME`
 - Production Next.js settings (`output: standalone`, strict mode, compression)
 - Multi-stage Dockerfile optimized for production
-- GitHub Actions deployment to AWS EC2 over SSH
+- GitHub Actions workflow that can automatically provision/reuse an EC2 instance and deploy over SSH
 
 ## Local setup
 ```bash
@@ -29,6 +29,28 @@ docker build -t fruit-vegetable-store .
 docker run -p 3000:3000 fruit-vegetable-store
 ```
 
-## GitHub Actions secrets required
-- `EC2_HOST`
+## GitHub Actions deployment behavior
+On every push to `main`, the workflow:
+1. Builds a production Docker image.
+2. Resolves deployment host:
+   - Uses `EC2_HOST` directly if provided, **or**
+   - Auto-finds/creates an EC2 instance tagged `fruit-vegetable-store-app`.
+3. Uploads image over SSH.
+4. Restarts container with `--restart unless-stopped`.
+
+## GitHub Secrets
+Required:
 - `EC2_SSH_KEY`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_REGION`
+
+Optional (required only when `EC2_HOST` is not set and you want auto-create):
+- `EC2_AMI_ID`
+- `EC2_INSTANCE_TYPE`
+- `EC2_KEY_PAIR_NAME`
+- `EC2_SECURITY_GROUP_ID`
+- `EC2_SUBNET_ID`
+
+Optional (if you already manage the instance yourself):
+- `EC2_HOST`
