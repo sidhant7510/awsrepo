@@ -1,0 +1,56 @@
+name: Build and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: fruit-vegetable-store
+  CONTAINER_NAME: fruit-vegetable-store
+  APP_PORT: 3000
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production Docker image
+        run: docker build --platform linux/amd64 -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
+
+      - name: Save Docker image archive
+        run: docker save $IMAGE_NAME:latest | gzip > image.tar.gz
+
+      - name: Configure SSH key
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_KEY" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload image archive to EC2
+        run: scp -i ~/.ssh/ec2_key image.tar.gz ubuntu@${{ secrets.EC2_HOST }}:/tmp/image.tar.gz
+
+      - name: Deploy and restart container
+        run: |
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+            set -e
+            docker load < /tmp/image.tar.gz
+            docker stop $CONTAINER_NAME || true
+            docker rm $CONTAINER_NAME || true
+            docker run -d \
+              --name $CONTAINER_NAME \
+              --restart unless-stopped \
+              -p $APP_PORT:3000 \
+              -e NODE_ENV=production \
+              $IMAGE_NAME:latest
+            rm -f /tmp/image.tar.gz
+          EOF
