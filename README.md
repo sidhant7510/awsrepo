@@ -45,7 +45,7 @@ Always required:
 Required only when `EC2_HOST` is not set (auto-provision mode):
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `AWS_REGION`
+- `AWS_REGION` (can be a Secret or Repository Variable)
 - `EC2_AMI_ID`
 - `EC2_INSTANCE_TYPE`
 - `EC2_KEY_PAIR_NAME`

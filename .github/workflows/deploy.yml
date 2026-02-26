@@ -36,13 +36,53 @@ jobs:
             echo "No EC2_HOST provided; workflow will resolve/provision EC2 via AWS API."
           fi
 
+
+      - name: Validate required configuration
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION || vars.AWS_REGION }}
+          EC2_AMI_ID: ${{ secrets.EC2_AMI_ID }}
+          EC2_INSTANCE_TYPE: ${{ secrets.EC2_INSTANCE_TYPE }}
+          EC2_KEY_PAIR_NAME: ${{ secrets.EC2_KEY_PAIR_NAME }}
+          EC2_SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
+          EC2_SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
+        run: |
+          set -euo pipefail
+
+          require_non_empty() {
+            local var_name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "Missing required setting: $var_name" >&2
+              exit 1
+            fi
+          }
+
+          require_non_empty "EC2_SSH_KEY" "${EC2_SSH_KEY:-}"
+
+          if [ "${{ steps.deploy_mode.outputs.use_static_host }}" = "true" ]; then
+            require_non_empty "EC2_HOST" "${EC2_HOST:-}"
+          else
+            require_non_empty "AWS_ACCESS_KEY_ID" "${AWS_ACCESS_KEY_ID:-}"
+            require_non_empty "AWS_SECRET_ACCESS_KEY" "${AWS_SECRET_ACCESS_KEY:-}"
+            require_non_empty "AWS_REGION (secret or variable)" "${AWS_REGION:-}"
+            require_non_empty "EC2_AMI_ID" "${EC2_AMI_ID:-}"
+            require_non_empty "EC2_INSTANCE_TYPE" "${EC2_INSTANCE_TYPE:-}"
+            require_non_empty "EC2_KEY_PAIR_NAME" "${EC2_KEY_PAIR_NAME:-}"
+            require_non_empty "EC2_SECURITY_GROUP_ID" "${EC2_SECURITY_GROUP_ID:-}"
+            require_non_empty "EC2_SUBNET_ID" "${EC2_SUBNET_ID:-}"
+          fi
+
       - name: Configure AWS credentials
         if: steps.deploy_mode.outputs.use_static_host != 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION || vars.AWS_REGION }}
 
       - name: Resolve or create EC2 instance
         if: steps.deploy_mode.outputs.use_static_host != 'true'
