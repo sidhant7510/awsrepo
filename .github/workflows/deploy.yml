@@ -1,0 +1,155 @@
+name: Build and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: fruit-vegetable-store
+  CONTAINER_NAME: fruit-vegetable-store
+  APP_PORT: 3000
+  INSTANCE_TAG_NAME: fruit-vegetable-store-app
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine deploy mode
+        id: deploy_mode
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -n "${EC2_HOST:-}" ]; then
+            echo "use_static_host=true" >> "$GITHUB_OUTPUT"
+            echo "host=$EC2_HOST" >> "$GITHUB_OUTPUT"
+            echo "Using provided EC2_HOST."
+          else
+            echo "use_static_host=false" >> "$GITHUB_OUTPUT"
+            echo "No EC2_HOST provided; workflow will resolve/provision EC2 via AWS API."
+          fi
+
+      - name: Configure AWS credentials
+        if: steps.deploy_mode.outputs.use_static_host != 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Resolve or create EC2 instance
+        if: steps.deploy_mode.outputs.use_static_host != 'true'
+        id: ec2
+        env:
+          EC2_AMI_ID: ${{ secrets.EC2_AMI_ID }}
+          EC2_INSTANCE_TYPE: ${{ secrets.EC2_INSTANCE_TYPE }}
+          EC2_KEY_PAIR_NAME: ${{ secrets.EC2_KEY_PAIR_NAME }}
+          EC2_SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
+          EC2_SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
+        run: |
+          set -euo pipefail
+
+          EXISTING_INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${INSTANCE_TAG_NAME}" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query "Reservations[].Instances[].InstanceId" \
+            --output text | awk '{print $1}')
+
+          if [ -n "${EXISTING_INSTANCE_ID:-}" ] && [ "$EXISTING_INSTANCE_ID" != "None" ]; then
+            echo "Reusing instance: $EXISTING_INSTANCE_ID"
+            CURRENT_STATE=$(aws ec2 describe-instances --instance-ids "$EXISTING_INSTANCE_ID" --query "Reservations[0].Instances[0].State.Name" --output text)
+            if [ "$CURRENT_STATE" = "stopped" ]; then
+              aws ec2 start-instances --instance-ids "$EXISTING_INSTANCE_ID" >/dev/null
+            fi
+            INSTANCE_ID="$EXISTING_INSTANCE_ID"
+          else
+            : "${EC2_AMI_ID:?Missing EC2_AMI_ID secret}"
+            : "${EC2_INSTANCE_TYPE:?Missing EC2_INSTANCE_TYPE secret}"
+            : "${EC2_KEY_PAIR_NAME:?Missing EC2_KEY_PAIR_NAME secret}"
+            : "${EC2_SECURITY_GROUP_ID:?Missing EC2_SECURITY_GROUP_ID secret}"
+            : "${EC2_SUBNET_ID:?Missing EC2_SUBNET_ID secret}"
+
+            USER_DATA=$'#!/bin/bash\nset -eux\napt-get update\napt-get install -y docker.io\nsystemctl enable docker\nsystemctl start docker\nusermod -aG docker ubuntu || true'
+
+            INSTANCE_ID=$(aws ec2 run-instances \
+              --image-id "$EC2_AMI_ID" \
+              --instance-type "$EC2_INSTANCE_TYPE" \
+              --key-name "$EC2_KEY_PAIR_NAME" \
+              --security-group-ids "$EC2_SECURITY_GROUP_ID" \
+              --subnet-id "$EC2_SUBNET_ID" \
+              --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_TAG_NAME}}]" \
+              --user-data "$USER_DATA" \
+              --query 'Instances[0].InstanceId' \
+              --output text)
+            echo "Created instance: $INSTANCE_ID"
+          fi
+
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+          HOST=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+
+      - name: Select final deploy host
+        id: final_host
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.deploy_mode.outputs.use_static_host }}" = "true" ]; then
+            echo "host=${{ steps.deploy_mode.outputs.host }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "host=${{ steps.ec2.outputs.host }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production Docker image
+        run: docker build --platform linux/amd64 -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
+
+      - name: Save Docker image archive
+        run: docker save $IMAGE_NAME:latest | gzip > image.tar.gz
+
+      - name: Configure SSH key
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_KEY" > ~/.ssh/ec2_key
+          chmod 600 ~/.ssh/ec2_key
+          ssh-keyscan -H ${{ steps.final_host.outputs.host }} >> ~/.ssh/known_hosts
+
+      - name: Wait for SSH readiness
+        run: |
+          for i in {1..30}; do
+            if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=5 -o StrictHostKeyChecking=yes ubuntu@${{ steps.final_host.outputs.host }} 'echo ok' >/dev/null 2>&1; then
+              echo "SSH is ready"
+              exit 0
+            fi
+            echo "Waiting for SSH... ($i/30)"
+            sleep 10
+          done
+          echo "SSH did not become ready in time"
+          exit 1
+
+      - name: Upload image archive to EC2
+        run: scp -i ~/.ssh/ec2_key image.tar.gz ubuntu@${{ steps.final_host.outputs.host }}:/tmp/image.tar.gz
+
+      - name: Deploy and restart container
+        run: |
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ steps.final_host.outputs.host }} << EOF
+            set -e
+            docker load < /tmp/image.tar.gz
+            docker stop $CONTAINER_NAME || true
+            docker rm $CONTAINER_NAME || true
+            docker run -d \
+              --name $CONTAINER_NAME \
+              --restart unless-stopped \
+              -p $APP_PORT:3000 \
+              -e NODE_ENV=production \
+              $IMAGE_NAME:latest
+            rm -f /tmp/image.tar.gz
+          EOF
