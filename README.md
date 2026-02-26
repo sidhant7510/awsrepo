@@ -33,19 +33,19 @@ docker run -p 3000:3000 fruit-vegetable-store
 On every push to `main`, the workflow:
 1. Builds a production Docker image.
 2. Resolves deployment host:
-   - Uses `EC2_HOST` directly if provided, **or**
-   - Auto-finds/creates an EC2 instance tagged `fruit-vegetable-store-app`.
+   - If `EC2_HOST` is set, it deploys directly to that IP/host (no AWS provisioning call).
+   - If `EC2_HOST` is empty, it auto-finds/creates an EC2 instance tagged `fruit-vegetable-store-app`.
 3. Uploads image over SSH.
 4. Restarts container with `--restart unless-stopped`.
 
 ## GitHub Secrets
-Required:
+Always required:
 - `EC2_SSH_KEY`
+
+Required only when `EC2_HOST` is not set (auto-provision mode):
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `AWS_REGION`
-
-Optional (required only when `EC2_HOST` is not set and you want auto-create):
+- `AWS_REGION` (can be a Secret or Repository Variable)
 - `EC2_AMI_ID`
 - `EC2_INSTANCE_TYPE`
 - `EC2_KEY_PAIR_NAME`

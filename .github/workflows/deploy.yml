@@ -21,17 +21,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Resolve or create EC2 instance
-        id: ec2
+      - name: Determine deploy mode
+        id: deploy_mode
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          set -euo pipefail
+          if [ -n "${EC2_HOST:-}" ]; then
+            echo "use_static_host=true" >> "$GITHUB_OUTPUT"
+            echo "host=$EC2_HOST" >> "$GITHUB_OUTPUT"
+            echo "Using provided EC2_HOST."
+          else
+            echo "use_static_host=false" >> "$GITHUB_OUTPUT"
+            echo "No EC2_HOST provided; workflow will resolve/provision EC2 via AWS API."
+          fi
+
+
+      - name: Validate required configuration
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION || vars.AWS_REGION }}
           EC2_AMI_ID: ${{ secrets.EC2_AMI_ID }}
           EC2_INSTANCE_TYPE: ${{ secrets.EC2_INSTANCE_TYPE }}
           EC2_KEY_PAIR_NAME: ${{ secrets.EC2_KEY_PAIR_NAME }}
@@ -40,11 +52,49 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -n "${EC2_HOST:-}" ]; then
-            echo "host=$EC2_HOST" >> "$GITHUB_OUTPUT"
-            echo "Using static EC2_HOST secret."
-            exit 0
+          require_non_empty() {
+            local var_name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "Missing required setting: $var_name" >&2
+              exit 1
+            fi
+          }
+
+          require_non_empty "EC2_SSH_KEY" "${EC2_SSH_KEY:-}"
+
+          if [ "${{ steps.deploy_mode.outputs.use_static_host }}" = "true" ]; then
+            require_non_empty "EC2_HOST" "${EC2_HOST:-}"
+          else
+            require_non_empty "AWS_ACCESS_KEY_ID" "${AWS_ACCESS_KEY_ID:-}"
+            require_non_empty "AWS_SECRET_ACCESS_KEY" "${AWS_SECRET_ACCESS_KEY:-}"
+            require_non_empty "AWS_REGION (secret or variable)" "${AWS_REGION:-}"
+            require_non_empty "EC2_AMI_ID" "${EC2_AMI_ID:-}"
+            require_non_empty "EC2_INSTANCE_TYPE" "${EC2_INSTANCE_TYPE:-}"
+            require_non_empty "EC2_KEY_PAIR_NAME" "${EC2_KEY_PAIR_NAME:-}"
+            require_non_empty "EC2_SECURITY_GROUP_ID" "${EC2_SECURITY_GROUP_ID:-}"
+            require_non_empty "EC2_SUBNET_ID" "${EC2_SUBNET_ID:-}"
           fi
+
+      - name: Configure AWS credentials
+        if: steps.deploy_mode.outputs.use_static_host != 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || vars.AWS_REGION }}
+
+      - name: Resolve or create EC2 instance
+        if: steps.deploy_mode.outputs.use_static_host != 'true'
+        id: ec2
+        env:
+          EC2_AMI_ID: ${{ secrets.EC2_AMI_ID }}
+          EC2_INSTANCE_TYPE: ${{ secrets.EC2_INSTANCE_TYPE }}
+          EC2_KEY_PAIR_NAME: ${{ secrets.EC2_KEY_PAIR_NAME }}
+          EC2_SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
+          EC2_SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
+        run: |
+          set -euo pipefail
 
           EXISTING_INSTANCE_ID=$(aws ec2 describe-instances \
             --filters "Name=tag:Name,Values=${INSTANCE_TAG_NAME}" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
@@ -84,6 +134,16 @@ jobs:
           HOST=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
 
+      - name: Select final deploy host
+        id: final_host
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.deploy_mode.outputs.use_static_host }}" = "true" ]; then
+            echo "host=${{ steps.deploy_mode.outputs.host }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "host=${{ steps.ec2.outputs.host }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -100,12 +160,12 @@ jobs:
           mkdir -p ~/.ssh
           echo "$EC2_SSH_KEY" > ~/.ssh/ec2_key
           chmod 600 ~/.ssh/ec2_key
-          ssh-keyscan -H ${{ steps.ec2.outputs.host }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ steps.final_host.outputs.host }} >> ~/.ssh/known_hosts
 
       - name: Wait for SSH readiness
         run: |
           for i in {1..30}; do
-            if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=5 -o StrictHostKeyChecking=yes ubuntu@${{ steps.ec2.outputs.host }} 'echo ok' >/dev/null 2>&1; then
+            if ssh -i ~/.ssh/ec2_key -o ConnectTimeout=5 -o StrictHostKeyChecking=yes ubuntu@${{ steps.final_host.outputs.host }} 'echo ok' >/dev/null 2>&1; then
               echo "SSH is ready"
               exit 0
             fi
@@ -116,11 +176,11 @@ jobs:
           exit 1
 
       - name: Upload image archive to EC2
-        run: scp -i ~/.ssh/ec2_key image.tar.gz ubuntu@${{ steps.ec2.outputs.host }}:/tmp/image.tar.gz
+        run: scp -i ~/.ssh/ec2_key image.tar.gz ubuntu@${{ steps.final_host.outputs.host }}:/tmp/image.tar.gz
 
       - name: Deploy and restart container
         run: |
-          ssh -i ~/.ssh/ec2_key ubuntu@${{ steps.ec2.outputs.host }} << EOF
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ steps.final_host.outputs.host }} << EOF
             set -e
             docker load < /tmp/image.tar.gz
             docker stop $CONTAINER_NAME || true
