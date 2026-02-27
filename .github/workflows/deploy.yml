@@ -216,24 +216,28 @@ jobs:
               -e NODE_ENV=production \
               $IMAGE_URI
 
-            sudo tee /etc/nginx/sites-enabled/fruit-vegetable-store >/dev/null <<NGINX
+            sudo tee /etc/nginx/sites-enabled/fruit-vegetable-store >/dev/null <<'NGINX'
             server {
               listen 80;
-              server_name $APP_DOMAIN;
+              server_name __APP_DOMAIN__;
 
               location / {
-                proxy_pass http://127.0.0.1:$APP_PORT;
+                proxy_pass http://127.0.0.1:__APP_PORT__;
                 proxy_http_version 1.1;
-                proxy_set_header Host \$host;
-                proxy_set_header X-Real-IP \$remote_addr;
-                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto \$scheme;
-                proxy_set_header Connection "";
+
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
               }
             }
             NGINX
 
+            sudo sed -i "s|__APP_DOMAIN__|$APP_DOMAIN|g; s|__APP_PORT__|$APP_PORT|g" /etc/nginx/sites-enabled/fruit-vegetable-store
             sudo rm -f /etc/nginx/sites-enabled/default
             sudo nginx -t
-            sudo systemctl reload nginx
+            sudo systemctl restart nginx
           EOF
