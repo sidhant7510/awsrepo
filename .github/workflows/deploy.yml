@@ -10,6 +10,7 @@ env:
   CONTAINER_NAME: fruit-vegetable-store
   APP_PORT: 3000
   INSTANCE_TAG_NAME: fruit-vegetable-store-app
+  ECR_REPOSITORY: fruit-vegetable-store
 
 jobs:
   deploy:
@@ -36,7 +37,6 @@ jobs:
             echo "No EC2_HOST provided; workflow will resolve/provision EC2 via AWS API."
           fi
 
-
       - name: Validate required configuration
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -49,6 +49,7 @@ jobs:
           EC2_KEY_PAIR_NAME: ${{ secrets.EC2_KEY_PAIR_NAME }}
           EC2_SECURITY_GROUP_ID: ${{ secrets.EC2_SECURITY_GROUP_ID }}
           EC2_SUBNET_ID: ${{ secrets.EC2_SUBNET_ID }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN || vars.APP_DOMAIN }}
         run: |
           set -euo pipefail
 
@@ -62,13 +63,14 @@ jobs:
           }
 
           require_non_empty "EC2_SSH_KEY" "${EC2_SSH_KEY:-}"
+          require_non_empty "AWS_ACCESS_KEY_ID" "${AWS_ACCESS_KEY_ID:-}"
+          require_non_empty "AWS_SECRET_ACCESS_KEY" "${AWS_SECRET_ACCESS_KEY:-}"
+          require_non_empty "AWS_REGION (secret or variable)" "${AWS_REGION:-}"
+          require_non_empty "APP_DOMAIN (secret or variable)" "${APP_DOMAIN:-}"
 
           if [ "${{ steps.deploy_mode.outputs.use_static_host }}" = "true" ]; then
             require_non_empty "EC2_HOST" "${EC2_HOST:-}"
           else
-            require_non_empty "AWS_ACCESS_KEY_ID" "${AWS_ACCESS_KEY_ID:-}"
-            require_non_empty "AWS_SECRET_ACCESS_KEY" "${AWS_SECRET_ACCESS_KEY:-}"
-            require_non_empty "AWS_REGION (secret or variable)" "${AWS_REGION:-}"
             require_non_empty "EC2_AMI_ID" "${EC2_AMI_ID:-}"
             require_non_empty "EC2_INSTANCE_TYPE" "${EC2_INSTANCE_TYPE:-}"
             require_non_empty "EC2_KEY_PAIR_NAME" "${EC2_KEY_PAIR_NAME:-}"
@@ -77,7 +79,6 @@ jobs:
           fi
 
       - name: Configure AWS credentials
-        if: steps.deploy_mode.outputs.use_static_host != 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -109,13 +110,7 @@ jobs:
             fi
             INSTANCE_ID="$EXISTING_INSTANCE_ID"
           else
-            : "${EC2_AMI_ID:?Missing EC2_AMI_ID secret}"
-            : "${EC2_INSTANCE_TYPE:?Missing EC2_INSTANCE_TYPE secret}"
-            : "${EC2_KEY_PAIR_NAME:?Missing EC2_KEY_PAIR_NAME secret}"
-            : "${EC2_SECURITY_GROUP_ID:?Missing EC2_SECURITY_GROUP_ID secret}"
-            : "${EC2_SUBNET_ID:?Missing EC2_SUBNET_ID secret}"
-
-            USER_DATA=$'#!/bin/bash\nset -eux\napt-get update\napt-get install -y docker.io\nsystemctl enable docker\nsystemctl start docker\nusermod -aG docker ubuntu || true'
+            USER_DATA=$'#!/bin/bash\nset -eux\napt-get update\napt-get install -y docker.io nginx\nsystemctl enable docker\nsystemctl start docker\nsystemctl enable nginx\nsystemctl start nginx\nusermod -aG docker ubuntu || true'
 
             INSTANCE_ID=$(aws ec2 run-instances \
               --image-id "$EC2_AMI_ID" \
@@ -144,14 +139,31 @@ jobs:
             echo "host=${{ steps.ec2.outputs.host }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Ensure ECR repository exists
+        run: |
+          set -euo pipefail
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "$ECR_REPOSITORY" >/dev/null
+
+      - name: Login to Amazon ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build production Docker image
-        run: docker build --platform linux/amd64 -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
-
-      - name: Save Docker image archive
-        run: docker save $IMAGE_NAME:latest | gzip > image.tar.gz
+      - name: Build and push production image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          LATEST_URI="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          docker build --platform linux/amd64 -t "$IMAGE_URI" -t "$LATEST_URI" .
+          docker push "$IMAGE_URI"
+          docker push "$LATEST_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+        id: image
 
       - name: Configure SSH key
         env:
@@ -175,21 +187,55 @@ jobs:
           echo "SSH did not become ready in time"
           exit 1
 
-      - name: Upload image archive to EC2
-        run: scp -i ~/.ssh/ec2_key image.tar.gz ubuntu@${{ steps.final_host.outputs.host }}:/tmp/image.tar.gz
-
-      - name: Deploy and restart container
+      - name: Deploy from ECR and configure Nginx reverse proxy
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION || vars.AWS_REGION }}
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
+          APP_DOMAIN: ${{ secrets.APP_DOMAIN || vars.APP_DOMAIN }}
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
         run: |
+          aws ecr get-login-password --region "$AWS_REGION" | \
+          ssh -i ~/.ssh/ec2_key ubuntu@${{ steps.final_host.outputs.host }} "docker login --username AWS --password-stdin $ECR_REGISTRY"
+
           ssh -i ~/.ssh/ec2_key ubuntu@${{ steps.final_host.outputs.host }} << EOF
             set -e
-            docker load < /tmp/image.tar.gz
+            sudo apt-get update -y
+            sudo apt-get install -y docker.io nginx
+            sudo systemctl enable docker
+            sudo systemctl start docker
+            sudo systemctl enable nginx
+            sudo systemctl start nginx
+
+            docker pull $IMAGE_URI
             docker stop $CONTAINER_NAME || true
             docker rm $CONTAINER_NAME || true
             docker run -d \
               --name $CONTAINER_NAME \
               --restart unless-stopped \
-              -p $APP_PORT:3000 \
+              -p 127.0.0.1:$APP_PORT:3000 \
               -e NODE_ENV=production \
-              $IMAGE_NAME:latest
-            rm -f /tmp/image.tar.gz
+              $IMAGE_URI
+
+            sudo tee /etc/nginx/sites-enabled/fruit-vegetable-store >/dev/null <<NGINX
+            server {
+              listen 80;
+              server_name $APP_DOMAIN;
+
+              location / {
+                proxy_pass http://127.0.0.1:$APP_PORT;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade \$http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto \$scheme;
+                proxy_cache_bypass \$http_upgrade;
+              }
+            }
+            NGINX
+
+            sudo rm -f /etc/nginx/sites-enabled/default
+            sudo nginx -t
+            sudo systemctl reload nginx
           EOF
