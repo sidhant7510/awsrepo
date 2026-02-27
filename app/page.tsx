@@ -1,4 +1,14 @@
-const products = [
+type ProductType = 'Vegetable' | 'Fruit';
+
+type Product = {
+  id: number;
+  name: string;
+  type: ProductType;
+  pricePerKg: number;
+  image: string;
+};
+
+const products: Product[] = [
   { id: 1, name: 'Tomato', type: 'Vegetable', pricePerKg: 2.2, image: '🍅' },
   { id: 2, name: 'Carrot', type: 'Vegetable', pricePerKg: 1.8, image: '🥕' },
   { id: 3, name: 'Spinach', type: 'Vegetable', pricePerKg: 2.9, image: '🥬' },

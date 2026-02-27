@@ -198,7 +198,7 @@ jobs:
           ssh -i ~/.ssh/ec2_key ubuntu@${{ steps.final_host.outputs.host }} "docker login --username AWS --password-stdin $ECR_REGISTRY"
 
           ssh -i ~/.ssh/ec2_key ubuntu@${{ steps.final_host.outputs.host }} << EOF
-            set -e
+            set -euo pipefail
             sudo apt-get update -y
             sudo apt-get install -y docker.io nginx
             sudo systemctl enable docker
@@ -239,5 +239,5 @@ jobs:
             sudo sed -i "s|__APP_DOMAIN__|$APP_DOMAIN|g; s|__APP_PORT__|$APP_PORT|g" /etc/nginx/sites-enabled/fruit-vegetable-store
             sudo rm -f /etc/nginx/sites-enabled/default
             sudo nginx -t
-            sudo systemctl restart nginx
+            sudo systemctl reload nginx
           EOF
