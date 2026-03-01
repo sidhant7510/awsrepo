@@ -43,9 +43,14 @@ On every push to `main`, the workflow:
 2. Otherwise auto-discovers or provisions an EC2 instance with AWS API.
 3. Builds and pushes Docker image to Amazon ECR.
 4. Deploys container on EC2.
-5. Writes Nginx config in `/etc/nginx/sites-enabled/fruit-vegetable-store`, validates with `nginx -t`, then reloads Nginx.
+5. Writes a production-grade Nginx config in `/etc/nginx/sites-enabled/fruit-vegetable-store`, validates with `nginx -t`, then reloads Nginx.
+6. Performs automatic rollback to the previously deployed container image and prior Nginx config if deployment validation fails.
 
 > Route53 automation is intentionally excluded (DNS configured manually).
+
+## DNS expectation
+- Point your DNS (for example `*.customerdemourl.com`) to the EC2 Elastic IP.
+- Set `APP_DOMAIN` to the host or wildcard pattern Nginx should serve (for example `*.customerdemourl.com`).
 
 ## Required GitHub secrets / variables
 Always required:
