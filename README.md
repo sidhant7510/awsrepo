@@ -1,25 +1,31 @@
-# Fresh Basket Store (Next.js)
+# Fresh Basket Store (Next.js + TypeScript)
 
-Production-ready Next.js app for a vegetable and fruit store.
+Production-ready Next.js App Router application for a vegetable and fruit store.
 
 ## Features
-- Home page with simple card UI for vegetables and fruits
-- API route at `/api/products`
-- Environment variable support via `NEXT_PUBLIC_STORE_NAME`
-- Production Next.js settings (`output: standalone`, strict mode, compression)
-- Multi-stage Dockerfile optimized for production
-- GitHub Actions workflow that can automatically provision/reuse an EC2 instance
-- ECR-based image publishing and EC2 pull-based deployment
-- Automated Nginx reverse-proxy configuration on EC2
+- Next.js App Router with TypeScript.
+- Home page with produce cards and API route at `/api/products`.
+- Environment variable support via `.env.example` using `NEXT_PUBLIC_STORE_NAME`.
+- Production Next.js configuration:
+  - `output: 'standalone'`
+  - `reactStrictMode: true`
+  - `compress: true`
+  - `poweredByHeader: false`
+- Secure multi-stage Docker build on lightweight Alpine base with non-root runtime.
+- GitHub Actions pipeline for CI/CD on push to `main`:
+  - Build app and Docker image
+  - Push image to Amazon ECR
+  - Deploy to EC2 (existing host mode or auto-provision mode)
+  - Generate and validate Nginx reverse proxy config in `/etc/nginx/sites-enabled/`
 
-## Local setup
+## Local development
 ```bash
 npm install
 cp .env.example .env.local
 npm run dev
 ```
 
-## Build for production
+## Production build
 ```bash
 npm run build
 npm run start
@@ -33,21 +39,28 @@ docker run -p 3000:3000 fruit-vegetable-store
 
 ## GitHub Actions deployment behavior
 On every push to `main`, the workflow:
-1. Resolves deployment host:
-   - If `EC2_HOST` is set, it deploys to that instance.
-   - If `EC2_HOST` is empty, it auto-finds/creates an EC2 instance tagged `fruit-vegetable-store-app`.
-2. Builds Docker image and pushes it to Amazon ECR.
-3. Pulls image from ECR on EC2, restarts container, installs/configures Nginx reverse proxy.
+1. Uses `EC2_HOST` when provided (deploy to existing instance).
+2. Otherwise auto-discovers or provisions an EC2 instance with AWS API.
+3. Builds and pushes Docker image to Amazon ECR.
+4. Deploys container on EC2.
+5. Writes a production-grade Nginx config in `/etc/nginx/sites-enabled/fruit-vegetable-store`, validates with `nginx -t`, then reloads Nginx.
+6. Performs automatic rollback to the previously deployed container image and prior Nginx config if deployment validation fails.
 
-## Required GitHub secrets/variables
+> Route53 automation is intentionally excluded (DNS configured manually).
+
+## DNS expectation
+- Point your DNS (for example `*.customerdemourl.com`) to the EC2 Elastic IP.
+- Set `APP_DOMAIN` to the host or wildcard pattern Nginx should serve (for example `*.customerdemourl.com`).
+
+## Required GitHub secrets / variables
 Always required:
 - `EC2_SSH_KEY`
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
-- `AWS_REGION` (secret or repository variable)
-- `APP_DOMAIN` (secret or repository variable)
+- `AWS_REGION` (secret or repo variable)
+- `APP_DOMAIN` (secret or repo variable)
 
-Required only when `EC2_HOST` is not set (auto-provision mode):
+Required when `EC2_HOST` is **not** set:
 - `EC2_AMI_ID`
 - `EC2_INSTANCE_TYPE`
 - `EC2_KEY_PAIR_NAME`
@@ -55,4 +68,4 @@ Required only when `EC2_HOST` is not set (auto-provision mode):
 - `EC2_SUBNET_ID`
 
 Optional:
-- `EC2_HOST` (for deploying to pre-existing instance)
+- `EC2_HOST`

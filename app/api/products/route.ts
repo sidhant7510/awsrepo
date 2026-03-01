@@ -1,6 +1,14 @@
 import { NextResponse } from 'next/server';
 
-const products = [
+type Product = {
+  id: number;
+  name: string;
+  type: 'Vegetable' | 'Fruit';
+  pricePerKg: number;
+  inStock: boolean;
+};
+
+const products: Product[] = [
   { id: 1, name: 'Tomato', type: 'Vegetable', pricePerKg: 2.2, inStock: true },
   { id: 2, name: 'Carrot', type: 'Vegetable', pricePerKg: 1.8, inStock: true },
   { id: 3, name: 'Spinach', type: 'Vegetable', pricePerKg: 2.9, inStock: true },
